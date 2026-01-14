@@ -91,12 +91,29 @@ class MemberFactory
                 }
             }
 
+            // Extract salt if password hash is present (required for SS BlowfishEncryptor)
+            if ($transaction->hasField('password_hash')) {
+                $hash = $transaction->getField('password_hash');
+                if ($hash && str_starts_with($hash, '$2y$')) {
+                    $customer->Salt = substr($hash, 4, 25);
+                }
+            }
+
             // Flag to prevent push back to Foxy on write
             $customer->FromDataFeed = true;
 
             // With bcrypt, the hash includes the algorithm info and salt,
             // so Silverstripe can validate it directly with password_verify()
             $customer->write();
+
+            // Force the encryption algorithm back to the site default in the database
+            // This ensures Silverstripe knows how to validate the bcrypt hash (usually 'blowfish')
+            // but prevents the double-hashing that would occur if we wrote it with that algorithm active.
+            if ($originalEncryption && $originalEncryption !== 'none') {
+                $table = 'Member';
+                $sql = "UPDATE \"$table\" SET \"PasswordEncryption\" = ? WHERE \"ID\" = ?";
+                \SilverStripe\ORM\DB::prepared_query($sql, [$originalEncryption, $customer->ID]);
+            }
 
             $this->member = $customer;
         } finally {

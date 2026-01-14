@@ -5,10 +5,12 @@ namespace Dynamic\Foxy\SingleSignOn\Extension;
 use Dynamic\Foxy\API\Client\APIClient;
 use Dynamic\Foxy\SingleSignOn\Client\CustomerClient;
 use SilverStripe\Control\HTTPResponse;
+use SilverStripe\Core\Config\Config;
 use SilverStripe\Core\Extension;
 use SilverStripe\Forms\Form;
 use SilverStripe\Forms\FormAction;
 use SilverStripe\Security\Member;
+use SilverStripe\Security\Security;
 
 /**
  * Adds Foxy sync actions to Member edit forms in SecurityAdmin.
@@ -66,6 +68,7 @@ class MemberItemRequestExtension extends Extension
         $client = CustomerClient::create($member);
         $data = $client->fetchCustomer();
 
+
         if (empty($data) || isset($data['error_message'])) {
             $errorMsg = $data['error_message'] ?? 'Failed to fetch customer from Foxy';
             return $this->owner->httpError(500, $errorMsg);
@@ -76,6 +79,7 @@ class MemberItemRequestExtension extends Extension
             'first_name' => 'FirstName',
             'last_name' => 'Surname',
             'email' => 'Email',
+            'password_hash' => 'Password',
         ];
 
         foreach ($fieldMap as $foxyField => $memberField) {
@@ -84,9 +88,33 @@ class MemberItemRequestExtension extends Extension
             }
         }
 
+        // Extract salt if password hash is present (required for SS BlowfishEncryptor)
+        if (!empty($data['password_hash']) && str_starts_with($data['password_hash'], '$2y$')) {
+            $member->Salt = substr($data['password_hash'], 4, 25);
+        }
+
         // Prevent push-back to Foxy
         $member->FromDataFeed = true;
-        $member->write();
+
+        // Disable password encryption to prevent double-hashing
+        // (Foxy sends pre-hashed bcrypt passwords)
+        $originalEncryption = Config::inst()->get(Security::class, 'password_encryption_algorithm');
+        Config::modify()->set(Security::class, 'password_encryption_algorithm', 'none');
+
+        try {
+            $member->write();
+
+            // Force the encryption algorithm back to the site default in the database
+            // This ensures Silverstripe knows how to validate the bcrypt hash (usually 'blowfish')
+            // but prevents the double-hashing that would occur if we wrote it with that algorithm active.
+            if ($originalEncryption && $originalEncryption !== 'none') {
+                $table = 'Member';
+                $sql = "UPDATE \"$table\" SET \"PasswordEncryption\" = ? WHERE \"ID\" = ?";
+                \SilverStripe\ORM\DB::prepared_query($sql, [$originalEncryption, $member->ID]);
+            }
+        } finally {
+            Config::modify()->set(Security::class, 'password_encryption_algorithm', $originalEncryption);
+        }
 
         return $this->owner->redirectBack();
     }

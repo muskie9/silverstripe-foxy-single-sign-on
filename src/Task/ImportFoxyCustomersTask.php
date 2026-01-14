@@ -118,19 +118,46 @@ class ImportFoxyCustomersTask extends BuildTask
         $member->FirstName = $firstName;
         $member->Surname = $lastName;
         $member->Customer_ID = $foxyCustomerId;
+
+        // Map password if present
+        if (isset($data['password_hash'])) {
+            $member->Password = $data['password_hash'];
+
+            // Extract salt if password hash is present (required for SS BlowfishEncryptor)
+            if (str_starts_with($data['password_hash'], '$2y$')) {
+                $member->Salt = substr($data['password_hash'], 4, 25);
+            }
+        }
+
         $member->FromDataFeed = true; // Prevent push-back to Foxy
 
         $action = $isNew ? 'CREATE' : 'UPDATE';
         $this->log("  {$action}: {$email} (Foxy ID: {$foxyCustomerId})");
 
         if (!$dryRun) {
-            $member->write();
-        }
+            // Disable password encryption to prevent double-hashing
+            $originalEncryption = \SilverStripe\Core\Config\Config::inst()->get(\SilverStripe\Security\Security::class, 'password_encryption_algorithm');
+            \SilverStripe\Core\Config\Config::modify()->set(\SilverStripe\Security\Security::class, 'password_encryption_algorithm', 'none');
 
-        if ($isNew) {
-            $this->created++;
+            try {
+                $member->write();
+
+                // Force encryption algo back provided it's not none
+                if ($originalEncryption && $originalEncryption !== 'none') {
+                    $table = 'Member';
+                    $sql = "UPDATE \"$table\" SET \"PasswordEncryption\" = ? WHERE \"ID\" = ?";
+                    \SilverStripe\ORM\DB::prepared_query($sql, [$originalEncryption, $member->ID]);
+                }
+
+            } finally {
+                \SilverStripe\Core\Config\Config::modify()->set(\SilverStripe\Security\Security::class, 'password_encryption_algorithm', $originalEncryption);
+            }
         } else {
-            $this->updated++;
+            if ($isNew) {
+                $this->created++;
+            } else {
+                $this->updated++;
+            }
         }
     }
 
